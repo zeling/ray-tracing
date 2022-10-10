@@ -85,8 +85,9 @@ impl Renderer for SphereRenderer {
                     dir: lower_left_corner + u * horizontal + v * vertical - origin,
                 };
                 let color = {
-                    if self.0.hits_by(&ray) {
-                        Color(glm::vec3(1.0, 0.0, 0.0))
+                    if let Some(p) = self.0.hits_by(&ray) {
+                        let norm = glm::normalize(&(p - self.0.center));
+                        Color((norm + glm::vec3(1.0, 1.0, 1.0)) * 0.5)
                     } else {
                         let dir = glm::normalize(&ray.dir);
                         let t = 0.5 * (dir[1] + 1.0);
@@ -139,12 +140,14 @@ struct Sphere {
 }
 
 impl Sphere {
-    fn hits_by(&self, ray: &Ray) -> bool {
+    fn hits_by(&self, ray: &Ray) -> Option<glm::Vec3> {
         let oc = ray.orig - self.center;
         let a = glm::dot(&ray.dir, &ray.dir);
-        let b = glm::dot(&ray.dir, &oc) * 2.0;
+        let h = glm::dot(&ray.dir, &oc);
         let c = glm::dot(&oc, &oc) - self.radius * self.radius;
-        let delta = b * b - 4.0 * a * c;
-        delta >= 0.0
+        let delta = h * h - a * c;
+        (delta >= 0.0)
+            .then(|| (-h - delta.sqrt()) / a)
+            .and_then(|t| (t > 0.0).then(|| ray.at(t)))
     }
 }
