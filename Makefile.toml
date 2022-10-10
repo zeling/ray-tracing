@@ -1,0 +1,18 @@
+[env]
+OUTPUT = "rendered.ppm"
+
+[tasks.format]
+command = "cargo"
+args = ["fmt"]
+
+[tasks.build]
+command = "cargo"
+args = ["build", "--release"]
+dependencies = ["format"]
+
+[tasks.render]
+script = "cargo run > rendered.ppm"
+dependencies = ["build"]
+
+[tasks.default]
+alias = "render"
