@@ -11,7 +11,7 @@ args = ["build", "--release"]
 dependencies = ["format"]
 
 [tasks.render]
-script = "cargo run > rendered.ppm"
+script = "cargo run --release > rendered.ppm"
 dependencies = ["build"]
 
 [tasks.default]
