@@ -18,21 +18,27 @@ struct RenderOpts {
 
 fn main() -> Result<(), std::io::Error> {
     let world = World {
-        objects: vec![Box::new(Sphere {
-            center: glm::vec3(0.0, 0.0, -2.0),
-            radius: 0.5,
-        })],
+        objects: vec![
+            Box::new(Sphere {
+                center: glm::vec3(0.0, 0.0, -1.0),
+                radius: 0.5,
+            }),
+            Box::new(Sphere {
+                center: glm::vec3(0.0, -100.5, -1.0),
+                radius: 100.0,
+            }),
+        ],
     };
     world.render(
         &mut std::io::stdout().lock(),
         RenderOpts {
             camera: CameraOpts {
-                viewport_width: 4.0,
-                viewport_height: 4.0 * 9.0 / 16.0,
-                focal_length: 2.0,
+                viewport_width: 2.0 * 16.0 / 9.0,
+                viewport_height: 2.0,
+                focal_length: 1.0,
             },
-            image_width: 800,
-            image_height: 450,
+            image_width: 400,
+            image_height: 225,
         },
     )
 }
@@ -57,8 +63,8 @@ impl World {
                 };
                 let color = {
                     let dir = glm::normalize(&ray.dir);
-                    if let Some(record) = self.objects[0].hit(&ray, 0.0, f32::MAX) {
-                        Color(0.5 * (record.norm + glm::vec3(1.0, 1.0, 1.0)))
+                    if let Some(record) = self.hit(&ray, 0.0, f32::MAX) {
+                        Color(0.5 * (record.normal + glm::vec3(1.0, 1.0, 1.0)))
                     } else {
                         let white = glm::vec3(1.0, 1.0, 1.0);
                         let blue = glm::vec3(0.0, 0.0, 1.0);
@@ -76,10 +82,12 @@ trait Hittable {
     fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord>;
 }
 
+#[derive(Debug)]
 struct HitRecord {
     t: f32,
-    norm: glm::Vec3,
     p: glm::Vec3,
+    front_face: bool,
+    normal: glm::Vec3,
 }
 
 struct Ray {
@@ -89,6 +97,7 @@ struct Ray {
 
 struct Color(glm::Vec3);
 
+#[derive(Debug)]
 struct Sphere {
     center: glm::Vec3,
     radius: f32,
@@ -104,24 +113,45 @@ impl Hittable for Sphere {
         if delta < 0.0 {
             return None;
         }
-        let record = |t| {
+        let record = |t| -> HitRecord {
             let p = ray.at(t);
-            let norm = glm::normalize(&(p - self.center));
-            HitRecord { t, norm, p }
+            let outward_normal = glm::normalize(&(p - self.center));
+            let front_face = glm::dot(&ray.dir, &outward_normal) < 0.0;
+            let normal = if front_face {
+                outward_normal
+            } else {
+                -outward_normal
+            };
+            HitRecord {
+                t,
+                p,
+                front_face,
+                normal,
+            }
         };
         let t1 = (-h - delta.sqrt()) / a;
         if t1 >= tmin && t1 <= tmax {
-            let p = ray.at(t1);
-            let norm = p - self.center;
             return Some(record(t1));
         }
         let t2 = (-h + delta.sqrt()) / a;
         if t2 >= tmin && t2 <= tmax {
-            let p = ray.at(t2);
-            let norm = p - self.center;
             return Some(record(t2));
         }
         None
+    }
+}
+
+impl Hittable for World {
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
+        let (record, _) =
+            self.objects
+                .iter()
+                .fold((None, tmax), |(record, closest_so_far), obj| {
+                    let cur = obj.hit(ray, tmin, closest_so_far);
+                    let closest_so_far = cur.as_ref().map(|r| r.t).unwrap_or(closest_so_far);
+                    (cur.or(record), closest_so_far)
+                });
+        record
     }
 }
 
