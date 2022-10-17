@@ -1,4 +1,7 @@
+use std::ops::Deref;
+
 use nalgebra_glm as glm;
+use rand::{Rng, SeedableRng};
 
 struct World {
     objects: Vec<Box<dyn Hittable>>,
@@ -14,6 +17,7 @@ struct RenderOpts {
     camera: CameraOpts,
     image_width: u32,
     image_height: u32,
+    samples_per_pixel: u32,
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -39,37 +43,66 @@ fn main() -> Result<(), std::io::Error> {
             },
             image_width: 400,
             image_height: 225,
+            samples_per_pixel: 16,
         },
     )
 }
 
+struct Camera {
+    viewport_origin: glm::Vec3,
+    horizontal: glm::Vec3,
+    vertical: glm::Vec3,
+}
+
+impl Camera {
+    fn new(opts: CameraOpts) -> Self {
+        let horizontal = glm::vec3(opts.viewport_width, 0.0, 0.0);
+        let vertical = glm::vec3(0.0, opts.viewport_height, 0.0);
+        let viewport_origin = glm::zero::<glm::Vec3>()
+            - horizontal / 2.0
+            - vertical / 2.0
+            - glm::vec3(0.0, 0.0, opts.focal_length);
+        Self {
+            viewport_origin,
+            horizontal,
+            vertical,
+        }
+    }
+
+    fn ray(&self, u: f32, v: f32) -> Ray {
+        Ray {
+            orig: glm::zero(),
+            dir: self.viewport_origin + self.horizontal * u + self.vertical * v
+                - glm::zero::<glm::Vec3>(),
+        }
+    }
+}
+
 impl World {
     fn render<W: std::io::Write>(&self, out: &mut W, opts: RenderOpts) -> std::io::Result<()> {
-        let origin = glm::vec3(0.0, 0.0, 0.0);
-        let horizontal = glm::vec3(opts.camera.viewport_width, 0.0, 0.0);
-        let vertical = glm::vec3(0.0, opts.camera.viewport_height, 0.0);
-        let lower_left_corner = origin
-            - horizontal * 0.5
-            - vertical * 0.5
-            - glm::vec3(0.0, 0.0, opts.camera.focal_length);
+        let camera = Camera::new(opts.camera);
+        let mut rng = rand::rngs::SmallRng::from_entropy();
         write!(out, "P3\n{} {}\n255\n", opts.image_width, opts.image_height)?;
         for j in (0..opts.image_height).rev() {
             for i in 0..opts.image_width {
-                let u = (i as f32) / (opts.image_width as f32 - 1.0);
-                let v = (j as f32) / (opts.image_height as f32 - 1.0);
-                let ray = Ray {
-                    orig: origin,
-                    dir: lower_left_corner + u * horizontal + v * vertical - origin,
-                };
                 let color = {
-                    let dir = glm::normalize(&ray.dir);
-                    if let Some(record) = self.hit(&ray, 0.0, f32::MAX) {
-                        Color(0.5 * (record.normal + glm::vec3(1.0, 1.0, 1.0)))
-                    } else {
-                        let white = glm::vec3(1.0, 1.0, 1.0);
-                        let blue = glm::vec3(0.0, 0.0, 1.0);
-                        Color(glm::lerp(&white, &blue, 0.5 * (dir[1] + 1.0)))
+                    let mut color = glm::zero::<glm::Vec3>();
+                    for _ in 0..opts.samples_per_pixel {
+                        let u =
+                            (i as f32 + rng.gen_range(0.0..1.0)) / (opts.image_width as f32 - 1.0);
+                        let v =
+                            (j as f32 + rng.gen_range(0.0..1.0)) / (opts.image_height as f32 - 1.0);
+                        let ray = camera.ray(u, v);
+                        if let Some(record) = self.hit(&ray, 0.0, f32::MAX) {
+                            color += 0.5 * (record.normal + glm::vec3(1.0, 1.0, 1.0));
+                        } else {
+                            let white = glm::vec3(1.0, 1.0, 1.0);
+                            let blue = glm::vec3(0.0, 0.0, 1.0);
+                            let dir = glm::normalize(&ray.dir);
+                            color += glm::lerp(&white, &blue, 0.5 * (dir[1] + 1.0));
+                        }
                     }
+                    Color(color / opts.samples_per_pixel as f32)
                 };
                 color.write(out)?;
             }
@@ -101,6 +134,21 @@ struct Color(glm::Vec3);
 struct Sphere {
     center: glm::Vec3,
     radius: f32,
+}
+
+impl<'a, H: Deref<Target = dyn Hittable + 'a> + 'a, I: Iterator<Item = &'a H> + Clone> Hittable
+    for I
+{
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
+        let (record, _) = self
+            .clone()
+            .fold((None, tmax), |(record, closest_so_far), obj| {
+                let cur = obj.deref().hit(ray, tmin, closest_so_far);
+                let closest_so_far = cur.as_ref().map(|r| r.t).unwrap_or(closest_so_far);
+                (cur.or(record), closest_so_far)
+            });
+        record
+    }
 }
 
 impl Hittable for Sphere {
@@ -143,15 +191,7 @@ impl Hittable for Sphere {
 
 impl Hittable for World {
     fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
-        let (record, _) =
-            self.objects
-                .iter()
-                .fold((None, tmax), |(record, closest_so_far), obj| {
-                    let cur = obj.hit(ray, tmin, closest_so_far);
-                    let closest_so_far = cur.as_ref().map(|r| r.t).unwrap_or(closest_so_far);
-                    (cur.or(record), closest_so_far)
-                });
-        record
+        self.objects.iter().hit(ray, tmin, tmax)
     }
 }
 
