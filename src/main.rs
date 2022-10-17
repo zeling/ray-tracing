@@ -18,6 +18,7 @@ struct RenderOpts {
     image_width: u32,
     image_height: u32,
     samples_per_pixel: u32,
+    max_sample_depth: u32,
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -43,7 +44,8 @@ fn main() -> Result<(), std::io::Error> {
             },
             image_width: 400,
             image_height: 225,
-            samples_per_pixel: 16,
+            samples_per_pixel: 100,
+            max_sample_depth: 50,
         },
     )
 }
@@ -86,28 +88,48 @@ impl World {
         for j in (0..opts.image_height).rev() {
             for i in 0..opts.image_width {
                 let color = {
-                    let mut color = glm::zero::<glm::Vec3>();
-                    for _ in 0..opts.samples_per_pixel {
-                        let u =
-                            (i as f32 + rng.gen_range(0.0..1.0)) / (opts.image_width as f32 - 1.0);
-                        let v =
-                            (j as f32 + rng.gen_range(0.0..1.0)) / (opts.image_height as f32 - 1.0);
-                        let ray = camera.ray(u, v);
-                        if let Some(record) = self.hit(&ray, 0.0, f32::MAX) {
-                            color += 0.5 * (record.normal + glm::vec3(1.0, 1.0, 1.0));
-                        } else {
-                            let white = glm::vec3(1.0, 1.0, 1.0);
-                            let blue = glm::vec3(0.0, 0.0, 1.0);
-                            let dir = glm::normalize(&ray.dir);
-                            color += glm::lerp(&white, &blue, 0.5 * (dir[1] + 1.0));
-                        }
-                    }
-                    Color(color / opts.samples_per_pixel as f32)
+                    let color =
+                        (0..opts.samples_per_pixel).fold(glm::zero(), |acc: glm::Vec3, _| {
+                            let u = (i as f32 + rng.gen_range(0.0..1.0))
+                                / (opts.image_width as f32 - 1.0);
+                            let v = (j as f32 + rng.gen_range(0.0..1.0))
+                                / (opts.image_height as f32 - 1.0);
+                            let ray = camera.ray(u, v);
+                            acc + self.sample(&ray, &mut rng, opts.max_sample_depth)
+                        }) / opts.samples_per_pixel as f32;
+                    Color(glm::sqrt(&color))
                 };
                 color.write(out)?;
             }
         }
         out.flush()
+    }
+
+    fn sample(&self, ray: &Ray, rng: &mut impl Rng, sample_depth: u32) -> glm::Vec3 {
+        if sample_depth == 0 {
+            return glm::zero();
+        }
+        if let Some(record) = self.hit(&ray, 0.001, f32::MAX) {
+            let random_in_unit = loop {
+                let candidate = glm::Vec3::from_fn(|_, _| rng.gen_range(-1.0..1.0));
+                if glm::dot(&candidate, &candidate) <= 1.0 {
+                    break candidate;
+                }
+            };
+            0.5 * self.sample(
+                &Ray {
+                    orig: record.p,
+                    dir: record.normal + glm::normalize(&random_in_unit),
+                },
+                rng,
+                sample_depth - 1,
+            )
+        } else {
+            let white = glm::vec3(1.0, 1.0, 1.0);
+            let blue = glm::vec3(0.5, 0.7, 1.0);
+            let dir = glm::normalize(&ray.dir);
+            glm::lerp(&white, &blue, 0.5 * (dir[1] + 1.0))
+        }
     }
 }
 
