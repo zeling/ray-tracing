@@ -1,7 +1,8 @@
 use std::ops::Deref;
 
+use approx::abs_diff_eq;
 use nalgebra_glm as glm;
-use rand::{Rng, SeedableRng};
+use rand::{thread_rng, Rng};
 
 struct World {
     objects: Vec<Box<dyn Hittable>>,
@@ -21,16 +22,80 @@ struct RenderOpts {
     max_sample_depth: u32,
 }
 
+struct Lambertian {
+    albedo: Color,
+}
+
+impl Material for Lambertian {
+    fn scatter(&self, _ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)> {
+        let random_in_unit = loop {
+            let candidate = glm::Vec3::from_fn(|_, _| thread_rng().gen_range(-1.0..1.0));
+            if glm::dot(&candidate, &candidate) <= 1.0 {
+                break candidate;
+            }
+        };
+        let dir = {
+            let dir = record.normal + glm::normalize(&random_in_unit);
+            if abs_diff_eq!(dir, glm::zero(), epsilon = 1e-8 /* f32::EPSILON */) {
+                record.normal
+            } else {
+                dir
+            }
+        };
+        Some((
+            Ray {
+                orig: record.p,
+                dir,
+            },
+            self.albedo,
+        ))
+    }
+}
+
+struct Metal {
+    albedo: Color,
+}
+
+impl Material for Metal {
+    fn scatter(&self, ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)> {
+        let reflected = Ray {
+            orig: record.p,
+            dir: ray.dir - 2.0 * glm::dot(&ray.dir, &record.normal) * record.normal,
+        };
+        (glm::dot(&reflected.dir, &record.normal) > 0.0).then_some((reflected, self.albedo))
+    }
+}
+
 fn main() -> Result<(), std::io::Error> {
     let world = World {
         objects: vec![
             Box::new(Sphere {
                 center: glm::vec3(0.0, 0.0, -1.0),
                 radius: 0.5,
+                material: Lambertian {
+                    albedo: Color(glm::vec3(0.7, 0.3, 0.3)),
+                },
             }),
             Box::new(Sphere {
                 center: glm::vec3(0.0, -100.5, -1.0),
                 radius: 100.0,
+                material: Lambertian {
+                    albedo: Color(glm::vec3(0.8, 0.8, 0.0)),
+                },
+            }),
+            Box::new(Sphere {
+                center: glm::vec3(-1.0, 0.0, -1.0),
+                radius: 0.5,
+                material: Metal {
+                    albedo: Color(glm::vec3(0.8, 0.8, 0.8)),
+                },
+            }),
+            Box::new(Sphere {
+                center: glm::vec3(1.0, 0.0, -1.0),
+                radius: 0.5,
+                material: Metal {
+                    albedo: Color(glm::vec3(0.8, 0.6, 0.2)),
+                },
             }),
         ],
     };
@@ -83,19 +148,18 @@ impl Camera {
 impl World {
     fn render<W: std::io::Write>(&self, out: &mut W, opts: RenderOpts) -> std::io::Result<()> {
         let camera = Camera::new(opts.camera);
-        let mut rng = rand::rngs::SmallRng::from_entropy();
         write!(out, "P3\n{} {}\n255\n", opts.image_width, opts.image_height)?;
         for j in (0..opts.image_height).rev() {
             for i in 0..opts.image_width {
                 let color = {
                     let color =
                         (0..opts.samples_per_pixel).fold(glm::zero(), |acc: glm::Vec3, _| {
-                            let u = (i as f32 + rng.gen_range(0.0..1.0))
+                            let u = (i as f32 + thread_rng().gen_range(0.0..1.0))
                                 / (opts.image_width as f32 - 1.0);
-                            let v = (j as f32 + rng.gen_range(0.0..1.0))
+                            let v = (j as f32 + thread_rng().gen_range(0.0..1.0))
                                 / (opts.image_height as f32 - 1.0);
                             let ray = camera.ray(u, v);
-                            acc + self.sample(&ray, &mut rng, opts.max_sample_depth)
+                            acc + self.sample(&ray, opts.max_sample_depth)
                         }) / opts.samples_per_pixel as f32;
                     Color(glm::sqrt(&color))
                 };
@@ -105,25 +169,16 @@ impl World {
         out.flush()
     }
 
-    fn sample(&self, ray: &Ray, rng: &mut impl Rng, sample_depth: u32) -> glm::Vec3 {
+    fn sample(&self, ray: &Ray, sample_depth: u32) -> glm::Vec3 {
         if sample_depth == 0 {
             return glm::zero();
         }
-        if let Some(record) = self.hit(&ray, 0.001, f32::MAX) {
-            let random_in_unit = loop {
-                let candidate = glm::Vec3::from_fn(|_, _| rng.gen_range(-1.0..1.0));
-                if glm::dot(&candidate, &candidate) <= 1.0 {
-                    break candidate;
-                }
-            };
-            0.5 * self.sample(
-                &Ray {
-                    orig: record.p,
-                    dir: record.normal + glm::normalize(&random_in_unit),
-                },
-                rng,
-                sample_depth - 1,
-            )
+        if let Some((record, material)) = self.objects.hit(&ray, 0.001, f32::MAX) {
+            if let Some((scattered, Color(attenuation))) = material.scatter(&ray, &record) {
+                attenuation.component_mul(&self.sample(&scattered, sample_depth - 1))
+            } else {
+                glm::zero()
+            }
         } else {
             let white = glm::vec3(1.0, 1.0, 1.0);
             let blue = glm::vec3(0.5, 0.7, 1.0);
@@ -134,7 +189,11 @@ impl World {
 }
 
 trait Hittable {
-    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord>;
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &dyn Material)>;
+}
+
+trait Material {
+    fn scatter(&self, ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)>;
 }
 
 #[derive(Debug)]
@@ -150,31 +209,31 @@ struct Ray {
     dir: glm::Vec3,
 }
 
+#[derive(Clone, Copy)]
 struct Color(glm::Vec3);
 
 #[derive(Debug)]
-struct Sphere {
+struct Sphere<M: Material> {
     center: glm::Vec3,
     radius: f32,
+    material: M,
 }
 
-impl<'a, H: Deref<Target = dyn Hittable + 'a> + 'a, I: Iterator<Item = &'a H> + Clone> Hittable
-    for I
-{
-    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
+impl Hittable for Vec<Box<dyn Hittable>> {
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &(dyn Material + '_))> {
         let (record, _) = self
-            .clone()
+            .iter()
             .fold((None, tmax), |(record, closest_so_far), obj| {
                 let cur = obj.deref().hit(ray, tmin, closest_so_far);
-                let closest_so_far = cur.as_ref().map(|r| r.t).unwrap_or(closest_so_far);
+                let closest_so_far = cur.as_ref().map(|(r, _m)| r.t).unwrap_or(closest_so_far);
                 (cur.or(record), closest_so_far)
             });
         record
     }
 }
 
-impl Hittable for Sphere {
-    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
+impl<M: Material> Hittable for Sphere<M> {
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &dyn Material)> {
         let oc = ray.orig - self.center;
         let a = glm::dot(&ray.dir, &ray.dir);
         let h = glm::dot(&ray.dir, &oc);
@@ -183,7 +242,7 @@ impl Hittable for Sphere {
         if delta < 0.0 {
             return None;
         }
-        let record = |t| -> HitRecord {
+        let record = |t| -> (HitRecord, &dyn Material) {
             let p = ray.at(t);
             let outward_normal = glm::normalize(&(p - self.center));
             let front_face = glm::dot(&ray.dir, &outward_normal) < 0.0;
@@ -192,12 +251,15 @@ impl Hittable for Sphere {
             } else {
                 -outward_normal
             };
-            HitRecord {
-                t,
-                p,
-                front_face,
-                normal,
-            }
+            (
+                HitRecord {
+                    t,
+                    p,
+                    front_face,
+                    normal,
+                },
+                &self.material,
+            )
         };
         let t1 = (-h - delta.sqrt()) / a;
         if t1 >= tmin && t1 <= tmax {
@@ -208,12 +270,6 @@ impl Hittable for Sphere {
             return Some(record(t2));
         }
         None
-    }
-}
-
-impl Hittable for World {
-    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<HitRecord> {
-        self.objects.iter().hit(ray, tmin, tmax)
     }
 }
 
