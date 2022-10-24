@@ -5,17 +5,22 @@ use nalgebra_glm as glm;
 use rand::{thread_rng, Rng};
 
 struct World {
+    camera: Camera,
     objects: Vec<Box<dyn Hittable>>,
 }
 
 struct CameraOpts {
-    viewport_width: f32,
-    viewport_height: f32,
+    vfov: f32,
+    aspect_ratio: f32,
     focal_length: f32,
+    eye: glm::Vec3,
+    center: glm::Vec3,
+    up: glm::Vec3,
+    aperture: f32,
+    focus_dist: f32,
 }
 
 struct RenderOpts {
-    camera: CameraOpts,
     image_width: u32,
     image_height: u32,
     samples_per_pixel: u32,
@@ -28,15 +33,10 @@ struct Lambertian {
 
 impl Material for Lambertian {
     fn scatter(&self, _ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)> {
-        let random_in_unit = loop {
-            let candidate = glm::Vec3::from_fn(|_, _| thread_rng().gen_range(-1.0..1.0));
-            if glm::dot(&candidate, &candidate) <= 1.0 {
-                break candidate;
-            }
-        };
+        let random_in_unit = random_in_unit_sphere();
         let dir = {
             let dir = record.normal + glm::normalize(&random_in_unit);
-            if abs_diff_eq!(dir, glm::zero(), epsilon = 1e-8 /* f32::EPSILON */) {
+            if abs_diff_eq!(dir, glm::zero(), epsilon = f32::EPSILON) {
                 record.normal
             } else {
                 dir
@@ -54,15 +54,56 @@ impl Material for Lambertian {
 
 struct Metal {
     albedo: Color,
+    fuzz: f32,
 }
 
 impl Material for Metal {
     fn scatter(&self, ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)> {
         let reflected = Ray {
             orig: record.p,
-            dir: ray.dir - 2.0 * glm::dot(&ray.dir, &record.normal) * record.normal,
+            dir: ray.dir - 2.0 * glm::dot(&ray.dir, &record.normal) * record.normal
+                + self.fuzz * random_in_unit_sphere(),
         };
         (glm::dot(&reflected.dir, &record.normal) > 0.0).then_some((reflected, self.albedo))
+    }
+}
+
+struct Dielectrics {
+    ir: f32,
+}
+
+impl Material for Dielectrics {
+    fn scatter(&self, ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)> {
+        let attenuation = Color(glm::vec3(1.0, 1.0, 1.0));
+        let refraction_ratio = if record.front_face {
+            1.0 / self.ir
+        } else {
+            self.ir
+        };
+        let ray_dir = glm::normalize(&ray.dir);
+        let cosine_theta = -glm::dot(&ray_dir, &record.normal);
+
+        let reflectance = {
+            let r0 = (1.0 - refraction_ratio) / (1.0 + refraction_ratio);
+            let r0 = r0 * r0;
+            r0 + (1.0 - r0) * f32::powi(1.0 - cosine_theta, 5)
+        };
+        let dir = if refraction_ratio * f32::sqrt(1.0 - cosine_theta * cosine_theta) > 1.0
+            || reflectance > thread_rng().gen_range(0.0..1.0)
+        {
+            ray_dir - 2.0 * glm::dot(&ray_dir, &record.normal) * record.normal
+        } else {
+            let out_x = (ray_dir + cosine_theta * record.normal) * refraction_ratio;
+            let out_y = -f32::sqrt(f32::max(0.0, 1.0 - glm::length2(&out_x))) * record.normal;
+            out_x + out_y
+        };
+        Some((
+            Ray {
+                orig: record.p,
+                dir,
+            },
+            attenuation,
+        ))
     }
 }
 
@@ -73,7 +114,7 @@ fn main() -> Result<(), std::io::Error> {
                 center: glm::vec3(0.0, 0.0, -1.0),
                 radius: 0.5,
                 material: Lambertian {
-                    albedo: Color(glm::vec3(0.7, 0.3, 0.3)),
+                    albedo: Color(glm::vec3(0.1, 0.2, 0.5)),
                 },
             }),
             Box::new(Sphere {
@@ -86,27 +127,36 @@ fn main() -> Result<(), std::io::Error> {
             Box::new(Sphere {
                 center: glm::vec3(-1.0, 0.0, -1.0),
                 radius: 0.5,
-                material: Metal {
-                    albedo: Color(glm::vec3(0.8, 0.8, 0.8)),
-                },
+                material: Dielectrics { ir: 1.5 },
+            }),
+            Box::new(Sphere {
+                center: glm::vec3(-1.0, 0.0, -1.0),
+                radius: -0.4,
+                material: Dielectrics { ir: 1.5 },
             }),
             Box::new(Sphere {
                 center: glm::vec3(1.0, 0.0, -1.0),
                 radius: 0.5,
                 material: Metal {
                     albedo: Color(glm::vec3(0.8, 0.6, 0.2)),
+                    fuzz: 0.0,
                 },
             }),
         ],
+        camera: Camera::new(CameraOpts {
+            vfov: std::f32::consts::PI / 9.0,
+            aspect_ratio: 16.0 / 9.0,
+            focal_length: 1.0,
+            eye: glm::vec3(3.0, 3.0, 2.0),
+            center: glm::vec3(0.0, 0.0, -1.0),
+            up: glm::vec3(0.0, 1.0, 0.0),
+            aperture: 2.0,
+            focus_dist: glm::vec3::<f32>(3.0, 3.0, 3.0).norm(),
+        }),
     };
     world.render(
         &mut std::io::stdout().lock(),
         RenderOpts {
-            camera: CameraOpts {
-                viewport_width: 2.0 * 16.0 / 9.0,
-                viewport_height: 2.0,
-                focal_length: 1.0,
-            },
             image_width: 400,
             image_height: 225,
             samples_per_pixel: 100,
@@ -116,38 +166,64 @@ fn main() -> Result<(), std::io::Error> {
 }
 
 struct Camera {
+    eye: glm::Vec3,
     viewport_origin: glm::Vec3,
     horizontal: glm::Vec3,
     vertical: glm::Vec3,
+    lens_radius: f32,
+    u: glm::Vec3,
+    v: glm::Vec3,
+    w: glm::Vec3,
 }
 
 impl Camera {
     fn new(opts: CameraOpts) -> Self {
-        let horizontal = glm::vec3(opts.viewport_width, 0.0, 0.0);
-        let vertical = glm::vec3(0.0, opts.viewport_height, 0.0);
-        let viewport_origin = glm::zero::<glm::Vec3>()
-            - horizontal / 2.0
-            - vertical / 2.0
-            - glm::vec3(0.0, 0.0, opts.focal_length);
+        let viewport_height = 2.0 * f32::tan(opts.vfov / 2.0) * opts.focal_length;
+        let viewport_width = viewport_height * opts.aspect_ratio;
+
+        let w = glm::normalize(&(opts.eye - opts.center));
+        let u = glm::cross(&opts.up, &w);
+        let v = glm::cross(&w, &u);
+
+        let horizontal = opts.focus_dist * viewport_width * u;
+        let vertical = opts.focus_dist * viewport_height * v;
+        let viewport_origin = opts.eye - horizontal / 2.0 - vertical / 2.0 - opts.focus_dist * w;
+        let lens_radius = opts.aperture / 2.0;
         Self {
+            eye: opts.eye,
             viewport_origin,
             horizontal,
             vertical,
+            lens_radius,
+            w,
+            u,
+            v,
         }
     }
 
     fn ray(&self, u: f32, v: f32) -> Ray {
+        let rd = {
+            loop {
+                let candidate = glm::vec3(
+                    thread_rng().gen_range(0.0..self.lens_radius),
+                    thread_rng().gen_range(0.0..self.lens_radius),
+                    0.0,
+                );
+                if candidate.norm() <= self.lens_radius {
+                    break candidate;
+                }
+            }
+        };
+        let orig = self.eye + (rd[0] * self.u) + (rd[1] * self.v);
         Ray {
-            orig: glm::zero(),
-            dir: self.viewport_origin + self.horizontal * u + self.vertical * v
-                - glm::zero::<glm::Vec3>(),
+            orig,
+            dir: self.viewport_origin + self.horizontal * u + self.vertical * v - orig,
         }
     }
 }
 
 impl World {
     fn render<W: std::io::Write>(&self, out: &mut W, opts: RenderOpts) -> std::io::Result<()> {
-        let camera = Camera::new(opts.camera);
         write!(out, "P3\n{} {}\n255\n", opts.image_width, opts.image_height)?;
         for j in (0..opts.image_height).rev() {
             for i in 0..opts.image_width {
@@ -158,7 +234,7 @@ impl World {
                                 / (opts.image_width as f32 - 1.0);
                             let v = (j as f32 + thread_rng().gen_range(0.0..1.0))
                                 / (opts.image_height as f32 - 1.0);
-                            let ray = camera.ray(u, v);
+                            let ray = self.camera.ray(u, v);
                             acc + self.sample(&ray, opts.max_sample_depth)
                         }) / opts.samples_per_pixel as f32;
                     Color(glm::sqrt(&color))
@@ -244,7 +320,7 @@ impl<M: Material> Hittable for Sphere<M> {
         }
         let record = |t| -> (HitRecord, &dyn Material) {
             let p = ray.at(t);
-            let outward_normal = glm::normalize(&(p - self.center));
+            let outward_normal = (p - self.center) / self.radius;
             let front_face = glm::dot(&ray.dir, &outward_normal) < 0.0;
             let normal = if front_face {
                 outward_normal
@@ -288,5 +364,14 @@ impl Color {
 impl Ray {
     fn at(&self, t: f32) -> glm::Vec3 {
         self.orig + t * self.dir
+    }
+}
+
+fn random_in_unit_sphere() -> glm::Vec3 {
+    loop {
+        let candidate = glm::Vec3::from_fn(|_, _| thread_rng().gen_range(-1.0..1.0));
+        if glm::dot(&candidate, &candidate) <= 1.0 {
+            break candidate;
+        }
     }
 }
