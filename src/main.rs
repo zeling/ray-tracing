@@ -3,10 +3,11 @@ use std::ops::Deref;
 use approx::abs_diff_eq;
 use nalgebra_glm as glm;
 use rand::{thread_rng, Rng};
+use rayon::prelude::*;
 
 struct World {
     camera: Camera,
-    objects: Vec<Box<dyn Hittable>>,
+    objects: Vec<Box<dyn Hittable + Send + Sync + 'static>>,
 }
 
 struct CameraOpts {
@@ -261,24 +262,35 @@ impl Camera {
 impl World {
     fn render<W: std::io::Write>(&self, out: &mut W, opts: RenderOpts) -> std::io::Result<()> {
         write!(out, "P3\n{} {}\n255\n", opts.image_width, opts.image_height)?;
-        let progress = indicatif::ProgressBar::new(opts.image_height as u64);
-        for j in (0..opts.image_height).rev() {
-            for i in 0..opts.image_width {
-                let color = {
-                    let color =
-                        (0..opts.samples_per_pixel).fold(glm::zero(), |acc: glm::Vec3, _| {
-                            let u = (i as f32 + thread_rng().gen_range(0.0..1.0))
-                                / (opts.image_width as f32 - 1.0);
-                            let v = (j as f32 + thread_rng().gen_range(0.0..1.0))
-                                / (opts.image_height as f32 - 1.0);
-                            let ray = self.camera.ray(u, v);
-                            acc + self.sample(&ray, opts.max_sample_depth)
-                        }) / opts.samples_per_pixel as f32;
+        let progress = indicatif::ProgressBar::new((opts.image_height * opts.image_width) as u64);
+        let progress = &progress;
+        for color in (0..opts.image_height)
+            .into_par_iter()
+            .rev()
+            .flat_map(|j| {
+                (0..opts.image_width).into_par_iter().map(move |i| {
+                    let color = (0..opts.samples_per_pixel)
+                        .into_par_iter()
+                        .fold(
+                            || glm::zero::<glm::Vec3>(),
+                            |acc: glm::Vec3, _| {
+                                let u = (i as f32 + thread_rng().gen_range(0.0..1.0))
+                                    / (opts.image_width as f32 - 1.0);
+                                let v = (j as f32 + thread_rng().gen_range(0.0..1.0))
+                                    / (opts.image_height as f32 - 1.0);
+                                let ray = self.camera.ray(u, v);
+                                acc + self.sample(&ray, opts.max_sample_depth)
+                            },
+                        )
+                        .sum::<glm::Vec3>()
+                        / opts.samples_per_pixel as f32;
+                    progress.inc(1);
                     Color(glm::sqrt(&color))
-                };
-                color.write(out)?;
-            }
-            progress.inc(1);
+                })
+            })
+            .collect::<Vec<_>>()
+        {
+            color.write(out)?;
         }
         progress.finish();
         out.flush()
@@ -303,11 +315,11 @@ impl World {
     }
 }
 
-trait Hittable {
+trait Hittable: Send + Sync + 'static {
     fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &dyn Material)>;
 }
 
-trait Material {
+trait Material: Send + Sync + 'static {
     fn scatter(&self, ray: &Ray, record: &HitRecord) -> Option<(Ray, Color)>;
 }
 
@@ -334,16 +346,33 @@ struct Sphere<M: Material> {
     material: M,
 }
 
-impl Hittable for Vec<Box<dyn Hittable>> {
-    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &(dyn Material + '_))> {
-        let (record, _) = self
-            .iter()
-            .fold((None, tmax), |(record, closest_so_far), obj| {
-                let cur = obj.deref().hit(ray, tmin, closest_so_far);
-                let closest_so_far = cur.as_ref().map(|(r, _m)| r.t).unwrap_or(closest_so_far);
-                (cur.or(record), closest_so_far)
-            });
-        record
+impl Hittable for Vec<Box<dyn Hittable + Send + Sync + 'static>> {
+    fn hit(&self, ray: &Ray, tmin: f32, tmax: f32) -> Option<(HitRecord, &dyn Material)> {
+        self.par_iter()
+            .fold(
+                || (None, tmax),
+                |(record, closest_so_far), obj| {
+                    let cur = obj.deref().hit(ray, tmin, closest_so_far);
+                    let closest_so_far = cur.as_ref().map(|(r, _m)| r.t).unwrap_or(closest_so_far);
+                    (cur.or(record), closest_so_far)
+                },
+            )
+            .map(|(rec, _)| rec)
+            .reduce(
+                || None,
+                |acc, rec| match (acc, rec) {
+                    (None, None) => None,
+                    (None, Some(x)) => Some(x),
+                    (Some(x), None) => Some(x),
+                    (Some(x), Some(y)) => {
+                        if x.0.t < y.0.t {
+                            Some(x)
+                        } else {
+                            Some(y)
+                        }
+                    }
+                },
+            )
     }
 }
 
