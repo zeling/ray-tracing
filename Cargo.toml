@@ -9,3 +9,4 @@ edition = "2021"
 nalgebra-glm = "0.17.0"
 rand = { version = "0.8.5", features = ["small_rng"] }
 approx = "0.5.1"
+indicatif = "0.17.1"

@@ -12,7 +12,6 @@ struct World {
 struct CameraOpts {
     vfov: f32,
     aspect_ratio: f32,
-    focal_length: f32,
     eye: glm::Vec3,
     center: glm::Vec3,
     up: glm::Vec3,
@@ -108,59 +107,96 @@ impl Material for Dielectrics {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let world = World {
-        objects: vec![
-            Box::new(Sphere {
-                center: glm::vec3(0.0, 0.0, -1.0),
-                radius: 0.5,
-                material: Lambertian {
-                    albedo: Color(glm::vec3(0.1, 0.2, 0.5)),
-                },
-            }),
-            Box::new(Sphere {
-                center: glm::vec3(0.0, -100.5, -1.0),
-                radius: 100.0,
-                material: Lambertian {
-                    albedo: Color(glm::vec3(0.8, 0.8, 0.0)),
-                },
-            }),
-            Box::new(Sphere {
-                center: glm::vec3(-1.0, 0.0, -1.0),
-                radius: 0.5,
-                material: Dielectrics { ir: 1.5 },
-            }),
-            Box::new(Sphere {
-                center: glm::vec3(-1.0, 0.0, -1.0),
-                radius: -0.4,
-                material: Dielectrics { ir: 1.5 },
-            }),
-            Box::new(Sphere {
-                center: glm::vec3(1.0, 0.0, -1.0),
-                radius: 0.5,
-                material: Metal {
-                    albedo: Color(glm::vec3(0.8, 0.6, 0.2)),
-                    fuzz: 0.0,
-                },
-            }),
-        ],
+    const ASPECT_RATIO: f32 = 3.0 / 2.0;
+    const IMAGE_WIDTH: u32 = 1200;
+    const IMAGE_HEIGHT: u32 = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as u32;
+    const SAMPLES_PER_PIXEL: u32 = 500;
+    const MAX_SAMPLE_DEPTH: u32 = 50;
+    let mut world = World {
+        objects: vec![Box::new(Sphere {
+            center: glm::vec3(0.0, -1000.0, 0.0),
+            radius: 1000.0,
+            material: Lambertian {
+                albedo: Color(glm::vec3(0.5, 0.5, 0.5)),
+            },
+        })],
         camera: Camera::new(CameraOpts {
             vfov: std::f32::consts::PI / 9.0,
-            aspect_ratio: 16.0 / 9.0,
-            focal_length: 1.0,
-            eye: glm::vec3(3.0, 3.0, 2.0),
-            center: glm::vec3(0.0, 0.0, -1.0),
+            aspect_ratio: ASPECT_RATIO,
+            eye: glm::vec3(13.0, 2.0, 3.0),
+            center: glm::vec3(0.0, 0.0, 0.0),
             up: glm::vec3(0.0, 1.0, 0.0),
-            aperture: 2.0,
-            focus_dist: glm::vec3::<f32>(3.0, 3.0, 3.0).norm(),
+            aperture: 0.1,
+            focus_dist: 10.0,
         }),
     };
+    for a in -11..11 {
+        for b in -11..11 {
+            let center = glm::vec3(
+                a as f32 + thread_rng().gen_range(0.0..0.9),
+                0.2,
+                b as f32 + thread_rng().gen_range(0.0..0.9),
+            );
+
+            if (center - glm::vec3(4.0, 0.2, 0.0)).norm() > 0.9 {
+                let choose_mat = thread_rng().gen_range(0.0..1.0);
+                if choose_mat < 0.8 {
+                    let albedo = Color(glm::Vec3::from_fn(|_x, _y| {
+                        thread_rng().gen_range(0.0..1.0) * thread_rng().gen_range(0.0..1.0)
+                    }));
+                    world.objects.push(Box::new(Sphere {
+                        center,
+                        radius: 0.2,
+                        material: Lambertian { albedo },
+                    }))
+                } else if choose_mat < 0.95 {
+                    let albedo = Color(glm::Vec3::from_fn(|_x, _y| {
+                        thread_rng().gen_range(0.5..1.0)
+                    }));
+                    let fuzz = thread_rng().gen_range(0.0..0.5);
+                    world.objects.push(Box::new(Sphere {
+                        center,
+                        radius: 0.2,
+                        material: Metal { albedo, fuzz },
+                    }))
+                } else {
+                    world.objects.push(Box::new(Sphere {
+                        center,
+                        radius: 0.2,
+                        material: Dielectrics { ir: 1.5 },
+                    }))
+                }
+            }
+        }
+    }
+
+    world.objects.push(Box::new(Sphere {
+        center: glm::vec3(0.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Dielectrics { ir: 1.5 },
+    }));
+    world.objects.push(Box::new(Sphere {
+        center: glm::vec3(-4.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Lambertian {
+            albedo: Color(glm::vec3(0.4, 0.2, 0.1)),
+        },
+    }));
+    world.objects.push(Box::new(Sphere {
+        center: glm::vec3(4.0, 1.0, 0.0),
+        radius: 1.0,
+        material: Metal {
+            albedo: Color(glm::vec3(0.7, 0.6, 0.5)),
+            fuzz: 0.0,
+        },
+    }));
     world.render(
         &mut std::io::stdout().lock(),
         RenderOpts {
-            image_width: 400,
-            image_height: 225,
-            samples_per_pixel: 100,
-            max_sample_depth: 50,
+            image_width: IMAGE_WIDTH,
+            image_height: IMAGE_HEIGHT,
+            samples_per_pixel: SAMPLES_PER_PIXEL,
+            max_sample_depth: MAX_SAMPLE_DEPTH,
         },
     )
 }
@@ -178,7 +214,7 @@ struct Camera {
 
 impl Camera {
     fn new(opts: CameraOpts) -> Self {
-        let viewport_height = 2.0 * f32::tan(opts.vfov / 2.0) * opts.focal_length;
+        let viewport_height = 2.0 * f32::tan(opts.vfov / 2.0);
         let viewport_width = viewport_height * opts.aspect_ratio;
 
         let w = glm::normalize(&(opts.eye - opts.center));
@@ -225,6 +261,7 @@ impl Camera {
 impl World {
     fn render<W: std::io::Write>(&self, out: &mut W, opts: RenderOpts) -> std::io::Result<()> {
         write!(out, "P3\n{} {}\n255\n", opts.image_width, opts.image_height)?;
+        let progress = indicatif::ProgressBar::new(opts.image_height as u64);
         for j in (0..opts.image_height).rev() {
             for i in 0..opts.image_width {
                 let color = {
@@ -241,7 +278,9 @@ impl World {
                 };
                 color.write(out)?;
             }
+            progress.inc(1);
         }
+        progress.finish();
         out.flush()
     }
 
